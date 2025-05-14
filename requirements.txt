@@ -1,0 +1,10 @@
+# requirements.txt
+streamlit==1.32.2
+langchain==0.1.5
+langchain-community
+langchain-groq==0.1.0
+faiss-cpu==1.7.4
+sentence-transformers==2.5.0
+pytube==15.0.0
+youtube-transcript-api==0.6.1
+torch==2.1.2 --index-url https://download.pytorch.org/whl/cpu
