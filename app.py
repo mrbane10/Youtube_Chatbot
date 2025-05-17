@@ -12,6 +12,8 @@ from langchain.schema import HumanMessage, AIMessage, Document
 from langchain_groq import ChatGroq
 from pytube import Playlist, YouTube
 from youtube_transcript_api import YouTubeTranscriptApi
+# Import WebshareProxyConfig correctly
+from youtube_transcript_api.formatters import TextFormatter
 import time
 import uuid
 import pickle
@@ -36,12 +38,22 @@ AVAILABLE_MODELS = {
     "qwen-qwq-32b": "Qwen QWQ 32B",
 }
 
-yta= YouTubeTranscriptApi(
-    proxy_config=WebshareProxyConfig(
-        proxy_username=st.secrets['WEBSHARE_PROXY_USERNAME'],
-        proxy_password=st.secrets['WEBSHARE_PROXY_PASSWORD'],
-    )
-)
+# Properly handle Webshare proxy configuration
+# We'll use a dictionary for proxy settings that can be used with YouTubeTranscriptApi
+def get_proxy_config():
+    """Get proxy configuration from Streamlit secrets."""
+    proxy_config = None
+    
+    # Check for proxy settings in secrets
+    if 'WEBSHARE_PROXY_USERNAME' in st.secrets and 'WEBSHARE_PROXY_PASSWORD' in st.secrets:
+        # Create a dictionary with proxy settings that can be passed to requests
+        proxy_url = f"http://{st.secrets['WEBSHARE_PROXY_USERNAME']}:{st.secrets['WEBSHARE_PROXY_PASSWORD']}@proxy.webshare.io:80"
+        proxy_config = {'http': proxy_url, 'https': proxy_url}
+    
+    return proxy_config
+
+# Initialize YouTubeTranscriptApi with proxy if available
+proxy_config = get_proxy_config()
 
 # Use Streamlit's caching mechanisms for file storage
 @st.cache_data(show_spinner=False)
@@ -87,41 +99,58 @@ def get_video_ids_from_playlist(playlist_url):
         # The playlist.video_urls will give us the full URLs
         # We'll extract the video IDs from them
         video_ids = []
+        video_titles = {}
+        
         for url in playlist.video_urls:
-            video_id = url.split("v=")[-1].split("&")[0]
-            video_ids.append(video_id)
-        return video_ids, playlist.title
+            video_id = extract_video_id(url)
+            if video_id:
+                video_ids.append(video_id)
+                try:
+                    yt = YouTube(url)
+                    video_titles[video_id] = yt.title
+                except:
+                    video_titles[video_id] = f"Video {video_id}"
+                    
+        return video_ids, playlist.title, video_titles
     except Exception as e:
         st.error(f"Error extracting videos from playlist: {e}")
-        return [], ""
+        return [], "", {}
 
 @st.cache_data(show_spinner=False)
 def fetch_transcripts(video_ids):
     """Download transcripts for all videos in the playlist using youtube_transcript_api."""
     transcripts_dict = {}
-    
-    progress_text = "Downloading transcripts..."
-    progress_bar = st.progress(0.0)
+    video_progress = st.progress(0.0)
     
     for i, video_id in enumerate(video_ids):
-        progress_bar.progress((i + 1) / len(video_ids))
-        st.caption(f"{progress_text} ({i+1}/{len(video_ids)})")
+        progress_value = (i + 1) / len(video_ids)
+        video_progress.progress(progress_value)
+        st.caption(f"Downloading transcripts... ({i+1}/{len(video_ids)})")
             
         try:
-            transcript_data = yta.get_transcript(video_id)
-            transcript_text = "\n".join([item['text'] for item in transcript_data])
+            # Use proxy config if available
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, proxies=proxy_config)
+            
+            # Format transcript text
+            formatter = TextFormatter()
+            transcript_text = formatter.format_transcript(transcript_list)
+            
             transcripts_dict[video_id] = transcript_text
             
         except Exception as e:
             st.warning(f"Could not download transcript for video {video_id}: {e}")
     
-    # We don't need to save the file to disk in Streamlit Cloud
-    # The cache will handle persistence
+    # Clear the progress bar after completion
+    video_progress.empty()
+    
     return transcripts_dict
 
 @st.cache_resource(show_spinner=False)
 def create_embeddings_model():
     """Create embedding model optimized for Streamlit Cloud (CPU-only)."""
+    # Force CPU usage for embeddings
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    
     return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2",
         model_kwargs={'device': 'cpu'},
@@ -146,8 +175,12 @@ def process_single_video(_video_url):
     
     # Download transcript
     try:
-        transcript_data = yta.get_transcript(video_id)
-        transcript_text = "\n".join([item['text'] for item in transcript_data])
+        # Use proxy config if available
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, proxies=proxy_config)
+        
+        # Format transcript text
+        formatter = TextFormatter()
+        transcript_text = formatter.format_transcript(transcript_list)
     except Exception as e:
         st.error(f"Could not download transcript for video: {e}")
         st.info("Make sure the video has captions available.")
@@ -183,7 +216,7 @@ def process_single_video(_video_url):
 def process_playlist_documents(_playlist_url):
     """Process the playlist documents and create vector store."""
     # Get video IDs from the playlist
-    video_ids, playlist_title = get_video_ids_from_playlist(_playlist_url)
+    video_ids, playlist_title, video_titles = get_video_ids_from_playlist(_playlist_url)
     
     if not video_ids:
         st.error("No videos found in the playlist.")
@@ -201,11 +234,15 @@ def process_playlist_documents(_playlist_url):
     # Convert transcript dictionary to documents for processing
     documents = []
     for video_id, transcript_text in transcripts_dict.items():
+        # Get video title if available
+        video_title = video_titles.get(video_id, f"Video {video_id}")
+        
         doc = Document(
             page_content=transcript_text,
             metadata={
                 "source": f"https://www.youtube.com/watch?v={video_id}",
-                "video_id": video_id
+                "video_id": video_id,
+                "title": video_title
             }
         )
         documents.append(doc)
@@ -228,10 +265,22 @@ def process_playlist_documents(_playlist_url):
 
 def get_conversation_chain(vectorstore, model_name):
     """Create the conversational chain with custom prompt template."""
-    # Get API key from secrets or environment
-    groq_api_key = os.environ.get("GROQ_API_KEY")
-    if not groq_api_key:
+    # Get API key from secrets or environment or session state
+    groq_api_key = None
+    
+    # Check in Streamlit secrets
+    if "GROQ_API_KEY" in st.secrets:
+        groq_api_key = st.secrets["GROQ_API_KEY"]
+    # Check in environment variables
+    elif os.environ.get("GROQ_API_KEY"):
+        groq_api_key = os.environ.get("GROQ_API_KEY")
+    # Check in session state (user provided)
+    else:
         groq_api_key = st.session_state.get("groq_api_key", "")
+    
+    if not groq_api_key:
+        st.error("No Groq API key found. Please provide one in the sidebar.")
+        return None
     
     llm = ChatGroq(
         api_key=groq_api_key, 
@@ -424,10 +473,11 @@ def handle_user_input(user_question):
             if "source_documents" in response and len(response["source_documents"]) > 0:
                 with st.expander("Sources"):
                     for i, doc in enumerate(response["source_documents"]):
-                        st.markdown(f"**Source {i+1}**: [Video Link]({doc.metadata['source']})")
+                        video_title = doc.metadata.get('title', 'Unknown Video')
+                        st.markdown(f"**Source {i+1}**: [{video_title}]({doc.metadata['source']})")
                         st.text(doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content)
         else:
-            ai_response = "Please load a YouTube playlist first."
+            ai_response = "Please load a YouTube video or playlist first."
     
     # Add assistant response to session
     session["messages"].append(AIMessage(content=ai_response))
@@ -459,16 +509,25 @@ def main():
         st.subheader("Configuration")
         
         # API Key handling - prefer secrets.toml, but allow manual entry
-        groq_api_key = os.environ.get("GROQ_API_KEY")
-        if not groq_api_key:
-            st.warning("GROQ API key not found in environment.")
+        groq_api_key = None
+        
+        # Check for API key in Streamlit secrets
+        if "GROQ_API_KEY" in st.secrets:
+            groq_api_key = st.secrets["GROQ_API_KEY"]
+            st.success("GROQ API key found in Streamlit secrets.")
+        # Check for API key in environment variables
+        elif os.environ.get("GROQ_API_KEY"):
+            groq_api_key = os.environ.get("GROQ_API_KEY")
+            st.success("GROQ API key found in environment variables.")
+        # Allow manual entry
+        else:
+            st.warning("GROQ API key not found in Streamlit secrets or environment.")
             groq_key_input = st.text_input("Enter your Groq API key:", type="password", value=st.session_state.groq_api_key)
             if groq_key_input:
                 st.session_state.groq_api_key = groq_key_input
-                
+                st.success("API key saved to session state.")
+            
             st.info("For Streamlit Cloud deployment, set this as a secret in your app settings.")
-        else:
-            st.success("GROQ API key found in environment.")
         
         # Model selection
         st.subheader("Model Selection")
@@ -504,42 +563,48 @@ def main():
         
         load_button_label = "Load Video" if st.session_state.source_type == "video" else "Load Playlist"
         if st.button(load_button_label):
+            # Validate URL and API key
             if not youtube_url:
                 st.error(f"Please enter a YouTube {st.session_state.source_type} URL")
-            elif not (os.environ.get("GROQ_API_KEY") or st.session_state.groq_api_key):
+            elif not (groq_api_key or st.session_state.groq_api_key):
                 st.error("Please provide a Groq API key")
             else:
-                # Check if URL is valid for the selected type
-                if st.session_state.source_type == "playlist" and not is_playlist_url(youtube_url):
-                    st.error("The URL doesn't appear to be a playlist. Please enter a playlist URL or switch to 'Single Video' mode.")
-                elif st.session_state.source_type == "video" and is_playlist_url(youtube_url):
-                    st.error("The URL appears to be a playlist. Please enter a single video URL or switch to 'Playlist' mode.")
-                else:
-                    with st.spinner(f"Processing {st.session_state.source_type}... This may take a while"):
-                        if st.session_state.source_type == "video":
-                            # Process single video
-                            vectorstore, video_title = process_single_video(youtube_url)
-                            source_title = video_title
-                        else:
-                            # Process playlist
-                            vectorstore, playlist_title = process_playlist_documents(youtube_url)
-                            source_title = playlist_title
+                # Detect URL type automatically
+                url_is_playlist = is_playlist_url(youtube_url)
+                
+                # If URL type doesn't match selected type, show a warning and automatically switch
+                if st.session_state.source_type == "video" and url_is_playlist:
+                    st.warning("The URL appears to be a playlist. Switching to 'Playlist' mode.")
+                    st.session_state.source_type = "playlist"
+                elif st.session_state.source_type == "playlist" and not url_is_playlist:
+                    st.warning("The URL appears to be a single video. Switching to 'Video' mode.")
+                    st.session_state.source_type = "video"
+                
+                with st.spinner(f"Processing {st.session_state.source_type}... This may take a while"):
+                    if st.session_state.source_type == "video":
+                        # Process single video
+                        vectorstore, video_title = process_single_video(youtube_url)
+                        source_title = video_title
+                    else:
+                        # Process playlist
+                        vectorstore, playlist_title = process_playlist_documents(youtube_url)
+                        source_title = playlist_title
+                    
+                    if vectorstore:
+                        st.session_state.vectorstore = vectorstore
+                        st.session_state.source_title = source_title
+                        st.session_state.source_url = youtube_url
                         
-                        if vectorstore:
-                            st.session_state.vectorstore = vectorstore
-                            st.session_state.source_title = source_title
-                            st.session_state.source_url = youtube_url
-                            
-                            # Create initial session
-                            if not st.session_state.current_session_id:
-                                create_new_session(f"New {source_title} Session")
-                            else:
-                                # Update conversation chain for all sessions
-                                for session_id in st.session_state.sessions:
-                                    model = st.session_state.sessions[session_id]["model"]
-                                    st.session_state.sessions[session_id]["conversation"] = get_conversation_chain(vectorstore, model)
-                            
-                            st.success(f"{source_type} processed successfully! You can now ask questions about it.")
+                        # Create initial session
+                        if not st.session_state.current_session_id:
+                            create_new_session(f"New {source_title} Session")
+                        else:
+                            # Update conversation chain for all sessions
+                            for session_id in st.session_state.sessions:
+                                model = st.session_state.sessions[session_id]["model"]
+                                st.session_state.sessions[session_id]["conversation"] = get_conversation_chain(vectorstore, model)
+                        
+                        st.success(f"{source_type} processed successfully! You can now ask questions about it.")
         
         if st.session_state.source_url:
             source_type_display = "Video" if st.session_state.source_type == "video" else "Playlist"
