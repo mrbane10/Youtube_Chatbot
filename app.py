@@ -11,7 +11,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import HumanMessage, AIMessage, Document
 from langchain_groq import ChatGroq
 from pytube import Playlist, YouTube
-from youtube_transcript_api import YouTubeTranscriptApi as yta
+from youtube_transcript_api import YouTubeTranscriptApi
 import time
 import uuid
 import pickle
@@ -35,6 +35,13 @@ AVAILABLE_MODELS = {
     "meta-llama/llama-4-scout-17b-16e-instruct": "Llama 4 Scout 17B Instruct",
     "qwen-qwq-32b": "Qwen QWQ 32B",
 }
+
+yta= YouTubeTranscriptApi(
+    proxy_config=WebshareProxyConfig(
+        proxy_username=st.secrets['WEBSHARE_PROXY_USERNAME'],
+        proxy_password=st.secrets['WEBSHARE_PROXY_PASSWORD'],
+    )
+)
 
 # Use Streamlit's caching mechanisms for file storage
 @st.cache_data(show_spinner=False)
