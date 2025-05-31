@@ -62,5 +62,5 @@ Only transcripts are fetched—no video/audio is downloaded.
 
 Groq API key is local or in Streamlit secrets.
 
-License
+## License
 MIT
