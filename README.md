@@ -45,20 +45,19 @@ streamlit run your_script.py
 ```
 
 ## Usage
-Enter a YouTube video or playlist URL in the sidebar.
+- Enter a YouTube video or playlist URL in the sidebar.
 
-Load the video or playlist.
+- Load the video or playlist.
 
-Ask questions about the content.
+- Ask questions about the content.
 
-(Optional) Manage multiple sessions or change LLM models.
+- (Optional) Manage multiple sessions or change LLM models.
 
-Advanced
-Proxy support: Add WEBSHARE_PROXY_USERNAME and WEBSHARE_PROXY_PASSWORD to Streamlit secrets if you need a proxy.
+- Proxy support: Add `WEBSHARE_PROXY_USERNAME` and `WEBSHARE_PROXY_PASSWORD` to Streamlit secrets if you need a proxy to download the transcripts as youtube blocks the ip for multiple requests.`
 
-Custom models: Edit the AVAILABLE_MODELS dictionary in the code to add more LLMs.
+- Custom models: Edit the `AVAILABLE_MODELS` dictionary in the code to add more LLMs.
 
-Security
+## Security
 Only transcripts are fetched—no video/audio is downloaded.
 
 Groq API key is local or in Streamlit secrets.
